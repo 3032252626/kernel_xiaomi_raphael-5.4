@@ -1446,6 +1446,54 @@ static int subsys_parse_devicetree(struct subsys_desc *desc)
 	return 0;
 }
 
+/**
+ * subsys_dt_index - derive the subsystem id from the device tree order
+ * @dev: platform device backing the subsystem
+ *
+ * Userspace (pm-service and its SELinux policy) refers to the subsystems
+ * through the hard-coded names subsys0..subsysN, which on these targets
+ * match the order in which the qcom,pil-tz-generic nodes are written
+ * under /soc.  Starting with 5.4 the device links + EPROBE_DEFER handling
+ * make the probe order differ from the DT order, so the dynamic ida
+ * allocation yields ids that no longer match what userspace expects:
+ * pm-service then reads an unlabelled /sys/bus/msm_subsys/devices/subsysN
+ * and is denied by SELinux, leaving every subsystem stopped.
+ *
+ * Deriving the id from the DT order instead keeps the names stable no
+ * matter in which order the platforms actually probe.
+ *
+ * Return: the index of the node among its pil-tz-generic siblings, or
+ * -ENODEV when the node is not a pil-tz-generic node or has no parent.
+ */
+static int subsys_dt_index(struct device *dev)
+{
+	struct device_node *np = dev ? dev->of_node : NULL;
+	struct device_node *parent, *child;
+	bool found = false;
+	int index = 0;
+
+	if (!np || !of_device_is_compatible(np, "qcom,pil-tz-generic"))
+		return -ENODEV;
+
+	parent = of_get_parent(np);
+	if (!parent)
+		return -ENODEV;
+
+	for_each_child_of_node(parent, child) {
+		if (child == np) {
+			found = true;
+			break;
+		}
+		if (of_device_is_compatible(child, "qcom,pil-tz-generic"))
+			index++;
+	}
+
+	of_node_put(child);
+	of_node_put(parent);
+
+	return found ? index : -ENODEV;
+}
+
 struct subsys_device *subsys_register(struct subsys_desc *desc)
 {
 	struct subsys_device *subsys;
@@ -1477,7 +1525,14 @@ struct subsys_device *subsys_register(struct subsys_desc *desc)
 	spin_lock_init(&subsys->track.s_lock);
 	init_subsys_timer(desc);
 
-	subsys->id = ida_simple_get(&subsys_ida, 0, 0, GFP_KERNEL);
+	subsys->id = subsys_dt_index(desc->dev);
+	if (subsys->id >= 0)
+		subsys->id = ida_simple_get(&subsys_ida, subsys->id,
+					    subsys->id + 1, GFP_KERNEL);
+
+	if (subsys->id < 0)
+		subsys->id = ida_simple_get(&subsys_ida, 0, 0, GFP_KERNEL);
+
 	if (subsys->id < 0) {
 		ret = subsys->id;
 		kfree(subsys);

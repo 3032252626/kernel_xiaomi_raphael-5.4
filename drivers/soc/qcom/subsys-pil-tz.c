@@ -1341,6 +1341,27 @@ static int subsys_setup_irqs(struct platform_device *pdev)
 	return 0;
 }
 
+/*
+ * Fallback path: some ROMs never open /dev/subsys_modem, so the modem
+ * subsystem is left in reset and userspace reports "Radio: null".
+ * Boot it from the kernel side once it has been registered.
+ * subsystem_get() is reference counted, so if userspace opens the char
+ * device later it simply reuses the running subsystem.
+ */
+static void pil_tz_modem_boot_work(struct work_struct *work)
+{
+	void *subsys;
+
+	subsys = subsystem_get_with_fwname("modem", "modem");
+	if (IS_ERR(subsys))
+		pr_err("%s: kernel side boot of modem failed: %ld\n",
+				__func__, PTR_ERR(subsys));
+	else
+		pr_info("%s: modem booted from kernel side\n", __func__);
+}
+
+static DECLARE_DELAYED_WORK(pil_tz_modem_boot, pil_tz_modem_boot_work);
+
 static int pil_tz_generic_probe(struct platform_device *pdev)
 {
 	struct pil_tz_data *d;
@@ -1566,6 +1587,10 @@ load_from_pil:
 		subsys_unregister(d->subsys);
 		goto err_subsys;
 	}
+
+	if (!strcmp(d->subsys_desc.name, "modem"))
+		schedule_delayed_work(&pil_tz_modem_boot,
+					msecs_to_jiffies(15000));
 
 	return 0;
 err_subsys:
